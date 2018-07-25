@@ -1,0 +1,153 @@
+version: 2.0
+
+references:
+  
+  container_config: &container_config
+    docker:
+      - image: circleci/golang:1.9
+    working_directory: /go/src/github.com/{{ORG_NAME}}/{{REPO_NAME}}
+
+  workspace_root: &workspace_root
+    ~/tmp/workspace    
+
+  attach_workspace: &attach_workspace
+    attach_workspace:
+      at: *workspace_root
+
+  install_up: &install_up
+      run: 
+          name: Install up and create AWS credential file
+          command: |
+            sudo chown -R $(whoami) /usr/local/bin/
+            curl -sf https://up.apex.sh/install | sh
+            mkdir ~/.aws
+            echo -e "[yo-da]\naws_access_key_id=$AWS_ACCESS_KEY_ID\naws_secret_access_key=$AWS_SECRET_ACCESS_KEY\n" > ~/.aws/credentials
+
+jobs:
+  build-test:
+    <<: *container_config
+
+    steps:
+      - checkout
+      - run:
+          name: Make all of our scripts executable
+          command: find . -name "*.sh" -maxdepth 1 -exec chmod +x {} \;
+
+      - run:
+          name: Install hugo
+          command: sudo apt-get install hugo
+
+      - run:
+          name: Fetch fylo theme
+          command: ./fetch_theme.sh $THEME_VERSION
+ 
+      - run:
+          name: TEST - create a website
+          command: |
+            cd website
+            hugo -d ./output
+            echo --- all done \(site created in "./website/output"\)
+
+      - run:
+          name: TEST -run our tests to make sure site was created OK
+          command: ./test.sh UNIT .
+
+      - run: 
+          name: Create workspace and add the generated website and the up config file
+          command: |
+            mkdir -p ~/tmp/workspace/from-build
+            cp -r "./website/output" ~/tmp/workspace/from-build/output
+            cp "./up.json" ~/tmp/workspace/from-build/up.json
+      - persist_to_workspace:
+          root: *workspace_root
+          paths:
+            - ./from-build/output
+            - ./from-build/up.json
+
+  deploy-stage:
+    <<: *container_config
+
+    steps:
+      - checkout
+
+      - *attach_workspace
+      - run:
+          name: Fetch generated website from workspace
+          command: mv ~/tmp/workspace/from-build ./to-deploy
+
+      - *install_up
+
+      - run: 
+          name: Deploy to stage
+          command: |
+            cd to-deploy
+            up
+
+      - run: 
+          name: TEST - smoke test deployed site on stage
+          command: |
+            cd to-deploy
+            ../test.sh SMOKE `up url` "<meta name=\"created-for\" content=\"yo-da\">"
+
+      - run: 
+          name: echo out where the site on stage is
+          command: |
+            cd to-deploy
+            echo $(up url)
+
+  deploy-prod:
+    <<: *container_config
+
+    steps:
+      - checkout
+
+      - *attach_workspace
+      - run:
+          name: Fetch generated website from workspace
+          command: mv ~/tmp/workspace/from-build ./to-deploy
+
+      - *install_up
+
+      - run: 
+          name: Deploy to prod
+          command: |
+            cd to-deploy
+            up deploy production
+
+      - run: 
+          name: TEST - smoke test deployed site on prod
+          command: |
+            cd to-deploy
+            ../test.sh SMOKE `up url` "<meta name=\"created-for\" content=\"yo-da\">"
+
+      - run: 
+          name: echo out where the site on stage is
+          command: |
+            cd to-deploy
+            echo $(up url production)
+
+workflows:
+  version: 2
+  build-test-deploy:
+    jobs:
+      - build-test:
+          filters:
+            branches:
+              only: /.*/
+            tags:
+              only: /^v.*/  
+      - deploy-stage:
+          requires:
+            - build-test
+          filters:
+            branches:
+              only:
+                - stage
+      - deploy-prod:
+          requires:
+            - build-test
+          filters:
+            branches:
+              ignore: /.*/
+            tags:
+              only: /^v.*/
